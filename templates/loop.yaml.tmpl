@@ -1,0 +1,152 @@
+# =============================================================================
+# loop.yaml — 프로젝트별 루프 설정 (machine SSoT)
+# =============================================================================
+# 이 파일은 `loop init` 이 코드베이스 스캔 + 풀 인터뷰를 거쳐 생성/채운다.
+# DESIGN §3 스키마를 그대로 따른다. (DESIGN: ~/.claude/skills/loop/DESIGN.md)
+#
+# 두 SSoT 의 역할 분리 (DESIGN §1·§3):
+#   - loop.yaml      = 기계가 파싱하는 설정 (dimensions·env·stop·triage·safety).
+#                      driver.js / `loop score` 가 읽는다.
+#   - scorecard.md   = 사람이 읽는 rubric 산문 (각 dimension 의 FULL/PARTIAL/
+#                      MISSING 정의 + §점수이력 append). 사람이 편집한다.
+#   ↳ 둘은 같은 dimension 집합을 가리킨다. yaml 의 id ↔ md 의 섹션이 1:1.
+#
+# anti-gaming 원칙 (DESIGN §0 invariant #3): 모든 probe.expect 는 **실환경 신호**
+# (DB SUM 불변 / 200 + 실데이터 / 비-권한 403 / 벤치)여야 한다. "테스트 N개 통과",
+# "grep 0건", "빌드 GREEN" 같은 정적 신호만으로 PASS 를 세지 않는다. 코드 존재 ≠
+# 운영 배선.
+#
+# 범위 (DESIGN §8 결정 #4·#5): probe·fix 는 **local 범위만**. prod/remote write·
+# 외부 cutover·force push·자격증명 금지. auto_merge 는 항상 false (브랜치 핸드오프).
+#
+# 작성 규약: 본문 주석은 한국어, 값/키/식별자/커맨드는 영문 유지.
+# 아래 <...> 플레이스홀더는 init 이 채운다. 예시값은 주석(# 예:)으로 병기한다.
+# =============================================================================
+
+version: 1                          # 스키마 버전. 현재 1 고정. init 이 검증.
+
+name: <project>                     # 프로젝트 슬러그. 보통 레포 디렉토리명.
+                                    # 예: stanley-cs
+
+# goal — 한 줄 성공 기준. "루프가 끝나면 무엇이 참인가" 를 관찰 가능·이진 판정
+#        가능한 outcome 으로. "make it better"(주관) 금지.
+goal: <한 줄 성공 기준 — 끝나면 뭐가 참인가>
+  # 예: "6대 PM 시나리오 내 모든 엔티티·FE/BE/DB 가 실환경에서 온전히 기능
+  #      (활성 재정규화 종합 98점 2회 연속)"
+
+# scorecard_path — 사람용 rubric 산문 + §점수이력의 위치.
+#   - 기본값 .loop/scorecard.md  (init 이 템플릿으로 새로 생성)
+#   - 그러나 기존 문서를 SSoT 로 재사용할 수 있다. Stanley 처럼 이미 wiki SSoT
+#     (docs/dev-plan-tobe-flow-scorecard.md)가 있으면 그 경로를 가리킨다 →
+#     init 이 새 scorecard.md 를 만들지 않고 기존 문서의 §점수이력에 append.
+#   - 경로는 프로젝트 루트 기준 상대경로 권장(이식성). driver/score 가 이 경로의
+#     §점수이력(append-only)에 full-audit 결과를 기록한다.
+scorecard_path: .loop/scorecard.md
+  # 예(기존 SSoT 재사용): docs/dev-plan-tobe-flow-scorecard.md
+
+# -----------------------------------------------------------------------------
+# dimensions — score function 의 축들 (DESIGN §3·§5)
+# -----------------------------------------------------------------------------
+# 각 dimension 은 도메인/관심사 하나. 도메인 점수 = band(FULL/PARTIAL/CONFLICT/
+# MISSING) × 가중 blend(단순평균 ❌, 최약 고리가 지배 — DESIGN §5 step 4).
+# 종합점수 = Σ(dimension 점수 × weight), 단 BLOCKED 항목은 분자·분모 모두 제외
+# (재정규화 §4.1a — DESIGN §5 step 5).
+#
+# 규칙:
+#   - Σ weights == 1.0 (init 이 검산. 부동소수 오차 ±0.001 허용).
+#   - id 는 안정적 슬러그(소문자·하이픈). scorecard.md 섹션과 1:1.
+#   - probe 는 dimension 당 최소 1개. 여러 신호가 필요하면 evidence 로 보강하되
+#     PASS 판정의 권위는 probe.expect 에 있다.
+# -----------------------------------------------------------------------------
+dimensions:
+  - id: <slug>                      # 예: materials
+    label: <사람 라벨>               # 예: "자재(부품) 신청-승인-출고-입고-교환"
+    weight: 0.22                    # 이 축의 배점 비중 (Σ=1.0). 큰 weight =
+                                    # triage ROI(배점×미달폭)에서 우선순위 높음.
+    scenarios: [<sub-id>, ...]      # (선택) 세부 시나리오 id 목록. rubric/triage
+                                    # 에서 어느 하위 흐름이 미달인지 추적용.
+                                    # 예: ["2.1", "2.7", "2.10"]
+    evidence:                       # rubric grounding — 점수를 실코드 위치에 결박.
+                                    # "코드 존재"가 아니라 "이 위치가 무엇을 증명/
+                                    # 반증하는가"를 적는다. file:line 형식 권장.
+      - "<path:line — 무엇을 증명/반증하는가>"
+        # 예: "MaterialReceiveService.java:22-23 — source 차감 OOS 주석(보존법칙 위반)"
+        # 예: "material_reserve 도메인 PESSIMISTIC_WRITE 견고하나 FE 호출처 0건(dead path)"
+    probe:                          # ★실환경 신호 (anti-gaming 핵심, local only)
+      kind: db                      # db | http | test | shell | grep
+                                    #   db    : read-only SQL (SUM/COUNT 불변식)
+                                    #   http  : curl — 200+실데이터 / 비-권한 403
+                                    #   test  : 특정 회귀 케이스 (개수 아님, 동작)
+                                    #   shell : 벤치/스크립트 신호
+                                    #   grep  : 최후수단(정적). 단독 PASS 금지 —
+                                    #           반드시 동작 probe 와 병행.
+      cmd: "<커맨드>"                # 예(db): "SELECT SUM(on_hand) FROM material_stock"
+                                    # 예(http): "curl -s -o /dev/null -w '%{http_code}'
+                                    #            -H \"Authorization: Bearer $TECH1\"
+                                    #            http://localhost:5300/material/reserve"
+      expect: "<PASS 모습 — 실환경 신호>"
+                                    # 예(db): "출고 전후 본사+센터 SUM 불변(무에서 생성 0)"
+                                    # 예(http): "tech1 토큰 200 + reserve row 증가;
+                                    #            타센터 토큰 403"
+
+  # ... 추가 dimension 들. init 이 스캔으로 후보 제안 → 인터뷰로 확정.
+  # (참고 — Stanley 인스턴스 dimension 윤곽: 자재 0.22 / 정체성(고객·제품) /
+  #  수리 처리 0.18 / 접수·상담 / 인프라·메타정합 / 보증·정산 0.08[정산은 BLOCKED].
+  #  Σ weights == 1.0 이 되도록 init 이 검산.)
+
+# -----------------------------------------------------------------------------
+# env — 루프의 "세계"를 살리는 법 (DESIGN §3·§5 사전조건)
+# -----------------------------------------------------------------------------
+# score 는 측정 전 env.start 가 살아있는지 먼저 확인한다. 죽었으면 live-probe
+# 신호 = STALE 처리(거짓 상승 방지 — DESIGN §5 step 1). 모든 env 커맨드는
+# **local 범위만** (원격/prod 금지 — safety.scope 참조).
+# -----------------------------------------------------------------------------
+env:
+  start: "<앱 기동 + readiness 폴링>"
+    # 앱을 띄우고 준비될 때까지 폴링하는 커맨드. 포트 점유만으로 'up' 판정 금지 —
+    # readiness 로그/health 엔드포인트로 확인.
+    # 예: "JAVA_HOME=... ./gradlew bootRun --args='--spring.profiles.active=local'
+    #      & until curl -sf localhost:5300/actuator/health; do sleep 2; done"
+  db: "<read-only DB probe 접속>"   # local DB 접속(읽기전용 검증용). 예:
+    # "mysql -h 127.0.0.1 -P 3307 -u std_dev_app -D std_dev --ssl-mode=DISABLED"
+  test: "<테스트 커맨드>"            # 회귀 테스트 실행법. 데몬/플래그 함정 주의를
+    # 주석으로 남길 것. 예: "./gradlew test   # 데몬 필수(--no-daemon 금지: Mockito 깨짐)"
+  auth: "<비-권한 토큰 획득법>"      # IDOR/scope probe 용 **비-관리자** 토큰 획득법.
+    # 관리자 토큰만 쓰면 전부 200 → authz 결함 미검출(DESIGN anti-gaming).
+    # 예: "POST /auth/login {id:tech1,pw:string} → export TECH1=$(... .accessToken)"
+
+# -----------------------------------------------------------------------------
+# stop — 결정론적 종료 조건 (DESIGN §3·§7)
+# -----------------------------------------------------------------------------
+stop:
+  target: 98                        # 활성 재정규화 종합점수 목표(0~100).
+  consecutive: 2                    # target 을 연속 몇 회 'full-audit'에서 달성하면
+                                    # STOP 선언. per-round 부분점수로는 STOP 금지
+                                    # (국소 회귀 미검출 — DESIGN §7).
+  full_audit_every: 3               # 권위 재채점(full re-audit) 주기(라운드 수).
+                                    # 사이 라운드는 터치 dimension 만 per-round 측정.
+
+# -----------------------------------------------------------------------------
+# triage_order — fix 순서 (DESIGN §1.2·§6)
+# -----------------------------------------------------------------------------
+# dimension id 의 명시 순서, 또는 "auto"(weakest-link-first = 배점×미달폭 ROI
+# 내림차순 자동 정렬). 보통 "auto" 권장 — 매 라운드 가장 가치 높은 deficit 부터.
+triage_order: auto
+  # 예(명시): [materials, repair-processing, identity, reception, infra, warranty-settlement]
+
+# -----------------------------------------------------------------------------
+# safety — local-only 가드 (DESIGN §3·§8 결정 #4)
+# -----------------------------------------------------------------------------
+# driver/maker 가 forbid 패턴을 시도하면 abort + surface. 이식 가능한 불변식.
+safety:
+  scope: local-only                 # 고정. probe·fix 는 local 범위만.
+  forbid:                           # 차단 목록(글롭/부분문자열). 프로젝트별 보강 가능.
+    - "push"                        # 원격 push 금지(브랜치 핸드오프만)
+    - "force"                       # force push 금지
+    - "rm -rf"                      # 파괴적 삭제 금지
+    - "flyway*qa"                   # 원격/QA 마이그레이션 금지(local 적용만)
+    - "flyway*prod"
+    - "<prod write>"                # 프로젝트 prod write 패턴. 예: "*surinshop*",
+                                    #   "kubectl*apply", "terraform apply"
+  auto_merge: false                 # 불변(DESIGN §0 invariant #5). 항상 브랜치만,
+                                    # 인간이 머지. true 로 바꾸지 말 것.

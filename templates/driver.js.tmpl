@@ -1,0 +1,256 @@
+// ──────────────────────────────────────────────────────────────────────────
+//  loop — Universal unattended multi-round driver  (templates/driver.js.tmpl)
+// ──────────────────────────────────────────────────────────────────────────
+//  이 파일은 `loop init` 이 .loop/loop.yaml 의 값으로 {{placeholder}} 를 치환해
+//  <project>/.loop/driver.js 로 **생성**하는 템플릿이다. 직접 편집하지 말고
+//  loop.yaml 을 고친 뒤 `loop init` 을 다시 돌려 재생성한다.
+//
+//  역할: `loop run N` (N≥2) 의 무인 멀티라운드 엔진. N=1 은 attended `loop run 1`
+//  (references/cycle.md) 가 처리하고 이 드라이버는 호출하지 않는다.
+//  호출: Workflow({ name: '{{name}}-loop', args: { maxRounds: N } }).
+//
+//  설계 불변(DESIGN §0 5 invariants):
+//   1. "잘됨"을 숫자로   — 모든 판정은 active_total(0~100) 점수에 결박.
+//   2. 숫자를 올린다      — round = triage→fix→verify→rescore→(주기)audit.
+//   3. 숫자를 못 속인다    — verify 는 maker≠verifier 실환경 probe. harness/리뷰
+//                          verdict 단독 PASS 금지, 실신호(상태코드/DB SUM/403)가 필수.
+//   4. 결정론적 종료      — STOP(target×consecutive) / ESCALATE(no-progress) /
+//                          BLOCKED(분모 제외) / budget / maxRounds.
+//   5. 사람이 루프 안에    — ★auto-merge 절대 금지. 브랜치만 만들고 인간이 머지.
+//
+//  컨텍스트 규율(DESIGN §6): 이 스크립트는 **compact 상태만** 보유한다(round 카운터·
+//  마지막 점수·stopReason). 문서 통독/파일 전체내용/추론은 전부 sub-agent 가 하고,
+//  진짜 상태는 디스크(.loop/scorecard.json · checkpoint.json · scorecard.md §이력)에
+//  산다 — "디스크 = 메모리". 그래서 중단/재개해도 checkpoint.json 에서 이어진다.
+//
+//  안전(DESIGN §8, local-only): probe·fix 는 로컬 범위만. 아래 FORBID 목록의 작업
+//  (원격 push·prod write·force push 등)은 maker/verifier 가 시도 시 abort+surface.
+//  DB probe 는 read-only, 마이그레이션은 local 적용만(원격은 인간 게이트).
+// ──────────────────────────────────────────────────────────────────────────
+
+export const meta = {
+  name: '{{name}}-loop',
+  description:
+    '{{name}} 완성도 루프 무인 멀티라운드 드라이버 — score→triage→fix→verify→rescore를 라운드 반복. ' +
+    '디스크=메모리(.loop/scorecard.md §이력 + scorecard.json + checkpoint.json), 스크립트는 compact 상태만 보유. ' +
+    `브랜치만 만들고 머지 안 함, STOP(${'{{stop_target}}'}×${'{{stop_consecutive}}'})/ESCALATE/BLOCKED/budget에서 정지.`,
+  phases: [
+    { title: 'Triage',  detail: '.loop/scorecard.md triage + checkpoint.json 선택 Read → 다음 dimension' },
+    { title: 'Fix',     detail: 'maker가 dimension 구현(브랜치 커밋, 머지 금지)' },
+    { title: 'Verify',  detail: 'maker≠verifier 실환경 재probe(실신호 필수)' },
+    { title: 'Rescore', detail: 'loop score per-round + 디스크 영속' },
+    { title: 'Audit',   detail: 'full_audit_every 라운드마다 full re-audit + STOP 확정' },
+  ],
+}
+
+// ── 프로젝트별 상수 (init 이 loop.yaml 값으로 치환) ─────────────────────────
+// {{name}}            : loop.yaml.name           — 프로젝트 slug
+// {{scorecard_path}}  : .loop/scorecard.md       — rubric 산문 + §점수이력 SSoT
+// {{runtime_dir}}     : .loop                     — 런타임 json 디렉토리
+// {{loop_yaml}}       : .loop/loop.yaml           — 기계 설정(dimensions·env·stop·safety)
+// {{stop_target}}     : stop.target              — 목표 점수
+// {{stop_consecutive}}: stop.consecutive         — target 연속 full-audit 횟수
+// {{full_audit_every}}: stop.full_audit_every    — 권위 재채점 주기(라운드)
+// {{triage_order}}    : triage_order             — "auto" 또는 [dim,...] 실행순서
+// {{forbid_list}}     : safety.forbid            — 금지 작업(쉼표구분 산문)
+// {{env_start}}/{{env_db}}/{{env_test}}/{{env_auth}} : env.*  — 세계를 살리는 법
+const SCORECARD       = '{{scorecard_path}}'
+const RUNTIME         = '{{runtime_dir}}'
+const LOOP_YAML       = '{{loop_yaml}}'
+const STOP_TARGET     = {{stop_target}}
+const STOP_CONSEC     = {{stop_consecutive}}
+const FULL_AUDIT_EVERY = {{full_audit_every}}
+const TRIAGE_ORDER    = '{{triage_order}}'   // "auto"(weakest-link-first) 또는 "[d1,d2,...]"
+const FORBID          = '{{forbid_list}}'    // 예: "push, force-push, prod write, *remote* migrate, rm -rf"
+
+// env 힌트(sub-agent 프롬프트에 주입 — 죽은 세계에서 거짓상승 방지)
+const ENV = {
+  start: '{{env_start}}',  // 앱 기동 + readiness 폴링
+  db:    '{{env_db}}',     // read-only DB probe(local only)
+  test:  '{{env_test}}',   // 테스트 커맨드(데몬/플래그 주의)
+  auth:  '{{env_auth}}',   // 비-권한 토큰 획득법(IDOR/scope probe 용)
+}
+
+const BRANCH = (args && args.branch) || 'loop/{{name}}'
+// budget 있으면 라운드당 ~120k 로 스케일, 없으면 6라운드 상한(무한루프 방지)
+const MAX_ROUNDS =
+  (args && args.maxRounds) ||
+  (budget.total ? Math.max(2, Math.floor(budget.remaining() / 120000)) : 6)
+
+// ── 단계별 compact 반환 스키마 (sub-agent 가 파일 전체/추론 대신 이것만 회수) ──
+const TRIAGE_SCHEMA = {
+  type: 'object',
+  required: ['next_id', 'label', 'active_total', 'no_progress', 'consecutive_target', 'blocked_only_remaining'],
+  properties: {
+    next_id:             { type: 'string',  description: '실행순서상 다음 미완 dimension id (loop.yaml dimensions[].id)' },
+    label:               { type: 'string',  description: '그 dimension 의 사람 라벨' },
+    active_total:        { type: 'number',  description: 'BLOCKED 재정규화 후 활성 종합점수' },
+    no_progress:         { type: 'number',  description: '같은 deficit 연속 미해결 라운드 수' },
+    consecutive_target:  { type: 'number',  description: 'active_total≥target 을 연속 만족한 full-audit 횟수' },
+    blocked_only_remaining: { type: 'boolean', description: '남은 미완이 BLOCKED 뿐인가' },
+    reason:              { type: 'string' },
+  },
+}
+const FIX_SCHEMA = {
+  type: 'object',
+  required: ['branch', 'files', 'summary', 'self_test_pass'],
+  properties: {
+    branch:         { type: 'string' },
+    files:          { type: 'array', items: { type: 'string' } },
+    summary:        { type: 'string',  description: '구현 요약 5줄 이내' },
+    self_test_pass: { type: 'boolean', description: '데몬 ON 자체 빌드/테스트 GREEN 여부' },
+  },
+}
+const VERDICT_SCHEMA = {
+  type: 'object',
+  required: ['pass', 'verdict', 'evidence'],
+  properties: {
+    pass:     { type: 'boolean' },
+    verdict:  { type: 'string', enum: ['PASS', 'ITERATE', 'ESCALATE'] },
+    evidence: { type: 'string', description: '실probe 핵심 신호(상태코드/DB SUM/403/벤치 등) — 이게 없으면 PASS 금지' },
+  },
+}
+const SCORE_SCHEMA = {
+  type: 'object',
+  required: ['dimension', 'dimension_score', 'active_total', 'appended'],
+  properties: {
+    dimension:       { type: 'string' },
+    dimension_score: { type: 'number' },
+    active_total:    { type: 'number' },
+    appended:        { type: 'boolean', description: 'scorecard.json + checkpoint.json 디스크 기록 여부' },
+  },
+}
+const AUDIT_SCHEMA = {
+  type: 'object',
+  required: ['active_total', 'consecutive_target', 'appended'],
+  properties: {
+    active_total:       { type: 'number' },
+    consecutive_target: { type: 'number' },
+    appended:           { type: 'boolean', description: 'scorecard.md §이력 + json 디스크 기록 여부' },
+  },
+}
+
+// ── compact 런타임 상태(이 스크립트가 메모리에 보유하는 전부) ────────────────
+let round = 0
+let lastScore = null
+let stopReason = null
+const produced = []
+
+while (round < MAX_ROUNDS) {
+  if (budget.total && budget.remaining() < 80000) { stopReason = 'budget-low'; break }
+
+  // ── 1. Triage ── 디스크만 선택적으로 읽고 다음 dimension 결정 (문서 통독 금지)
+  phase('Triage')
+  const tri = await agent(
+    `완성도 루프 triage. ${LOOP_YAML}(dimensions·triage_order·stop) + ${SCORECARD} 의 §점수이력 마지막 행 + ` +
+    `${RUNTIME}/checkpoint.json 만 선택적으로 Read(★통독 금지 — offset/Grep 으로 부분 조회). ` +
+    `triage_order=${TRIAGE_ORDER} 에 따라 다음 미완(deficit) dimension 을 고른다: ` +
+    `"auto" 면 weakest-link-first(최약 고리 = 가중 binding constraint), 명시 배열이면 그 실행순서상 첫 미완. ` +
+    `반환: next_id, label, 현재 active_total(§4.1a BLOCKED 재정규화 후), no_progress 카운트, ` +
+    `consecutive_target(target=${STOP_TARGET} 연속 만족 횟수), 남은 게 BLOCKED 뿐인지(blocked_only_remaining).`,
+    { label: `triage-r${round + 1}`, phase: 'Triage', schema: TRIAGE_SCHEMA }
+  )
+  if (!tri) { stopReason = 'triage-failed'; break }
+
+  // ── 결정론적 종료 게이트 (DESIGN §7) ──
+  // STOP 은 full 점수로만 확정한다(per-round 부분점수로 STOP 선언 금지 — 국소회귀 미검출).
+  // 여기서는 직전 audit 이 이미 target×consecutive 를 충족했는지를 checkpoint 가 알려준다.
+  if (tri.active_total >= STOP_TARGET && tri.consecutive_target >= STOP_CONSEC) {
+    stopReason = `STOP-${STOP_TARGET}x${STOP_CONSEC}`; break
+  }
+  if (tri.blocked_only_remaining) { stopReason = 'BLOCKED-only-remaining'; break }
+  if (tri.no_progress >= 2)        { stopReason = `ESCALATE-no-progress@${tri.next_id}`; break }
+
+  log(`R${round + 1}: ${tri.next_id} (${tri.label}) · active=${tri.active_total} · no_progress=${tri.no_progress}`)
+
+  // ── 2. Fix (maker) ── 브랜치에 커밋, 머지 금지. compact 만 반환
+  phase('Fix')
+  const fix = await agent(
+    `${'{{name}}'} maker. ${BRANCH} 브랜치(없으면 기준 브랜치에서 생성, 있으면 그 위에 적층)에서 ` +
+    `dimension "${tri.next_id}" 를 ${SCORECARD} 의 해당 rubric(FULL 정의)대로 구현. ` +
+    `★안전(local-only, DESIGN §8): 다음 작업 절대 금지 — ${FORBID}. 원격/prod/자격증명/force-push 시도 시 즉시 중단+surface. ` +
+    `마이그레이션은 local 적용·검증만(원격 적용 금지). ` +
+    `환경: 기동="${ENV.start}", 테스트="${ENV.test}"(플래그/데몬 주의). ` +
+    `구현 후 ${BRANCH} 에 커밋(★머지 금지). 자체 빌드/테스트 GREEN 확인. ` +
+    `★compact 만 반환: branch·바뀐 files 목록·summary 5줄·self_test_pass. 파일 전체내용/추론 반환 금지.`,
+    { label: `fix-r${round + 1}-${tri.next_id}`, phase: 'Fix', schema: FIX_SCHEMA }
+  )
+  if (!fix) { stopReason = `fix-failed@${tri.next_id}`; break }
+
+  // ── 3. Verify (maker≠verifier) ── 코드 안 짠 별도 에이전트가 실환경 재probe (anti-gaming)
+  phase('Verify')
+  const ver = await agent(
+    `${'{{name}}'} verifier — ★당신은 이 코드를 짜지 않았다(독립 검증). ${BRANCH} 브랜치를 체크아웃해 ` +
+    `dimension "${tri.next_id}" fix 를 검증한다: ` +
+    `(1) 프로젝트 코드리뷰(가능하면 전문 리뷰 에이전트 fan-out). ` +
+    `(2) ★실환경 재probe — ${SCORECARD} 의 "${tri.next_id}" probe 정의 + ${LOOP_YAML} dimensions[].probe 대로. ` +
+    `세계를 먼저 살린다: 기동="${ENV.start}". 신호 수집: DB="${ENV.db}"(read-only), 비-권한 토큰="${ENV.auth}". ` +
+    `★리뷰 verdict 단독으로 PASS 금지 — 실probe 신호(상태코드/DB SUM/403/벤치)가 필수다. ` +
+    `live 가 죽어 신호를 못 얻으면 pass=false + verdict="ITERATE"(거짓상승 방지). ` +
+    `반환: pass·verdict·evidence(핵심 실신호).`,
+    { label: `verify-r${round + 1}-${tri.next_id}`, phase: 'Verify', schema: VERDICT_SCHEMA }
+  )
+
+  if (!ver || !ver.pass) {
+    log(`R${round + 1}: verify FAIL (${ver ? ver.verdict : 'agent-died'}) → no-progress++`)
+    // 실패도 디스크에 기록(다음 라운드 triage 가 no_progress 를 보고 ESCALATE 판정)
+    await agent(
+      `dimension "${tri.next_id}" verify 실패 기록. ${RUNTIME}/checkpoint.json 의 no_progress 를 +1, ` +
+      `last_verdict="ITERATE" 로 갱신(디스크 write). 점수 변경 없음.`,
+      { label: `checkpoint-fail-r${round + 1}`, phase: 'Rescore' }
+    )
+    round++
+    continue
+  }
+
+  // ── 4. Rescore (per-round) ── loop score per-round 위임 + 디스크 영속
+  phase('Rescore')
+  const sc = await agent(
+    `loop score 를 per-round 모드로 dimension "${tri.next_id}" 만 재채점(터치한 축 1개만). ` +
+    `§4.1a 활성 재정규화(BLOCKED 분자·분모 제외) 적용. observed 동작 → band(FULL/PARTIAL/CONFLICT/MISSING) → 가중 blend. ` +
+    `${RUNTIME}/scorecard.json + checkpoint.json(next_id 비움·no_progress=0·last_verdict="PASS"·active_total·consecutive_target) ` +
+    `기록(디스크 write). ★compact 만: dimension·dimension_score·active_total·appended.`,
+    { label: `rescore-r${round + 1}-${tri.next_id}`, phase: 'Rescore', schema: SCORE_SCHEMA }
+  )
+
+  produced.push({ round: round + 1, dimension: tri.next_id, branch: fix.branch, active_total: sc ? sc.active_total : null })
+  if (sc && lastScore != null && sc.active_total <= lastScore) log(`R${round + 1}: 진전 없음(${lastScore}→${sc.active_total})`)
+  if (sc) lastScore = sc.active_total
+
+  // ── 5. Audit ── full_audit_every 라운드마다 full re-audit (교차오염·회귀 검출 + STOP 확정) ──
+  // STOP 은 오직 이 full audit 점수로만 확정된다(DESIGN §7).
+  if ((round + 1) % FULL_AUDIT_EVERY === 0) {
+    phase('Audit')
+    const audit = await agent(
+      `loop score 를 full 모드로 — ${LOOP_YAML} 의 전 dimensions 를 sub-agent fan-out 으로 재감사(교차오염·국소회귀 검출). ` +
+      `각 축 probe 를 실환경에서 다시 돌린다(기동="${ENV.start}"). §4.1a 활성 재정규화 적용. ` +
+      `직전 full 대비 연속 target(${STOP_TARGET}) 충족이면 consecutive_target 을 증가, 아니면 0 으로 리셋. ` +
+      `${SCORECARD} §점수이력에 R${round + 1} 행 append + ${RUNTIME}/scorecard.json + checkpoint.json 기록(디스크 write). ` +
+      `★compact 만: active_total·consecutive_target·appended.`,
+      { label: `audit-r${round + 1}`, phase: 'Audit', schema: AUDIT_SCHEMA }
+    )
+    if (audit) {
+      if (audit.active_total != null) lastScore = audit.active_total
+      if (audit.active_total >= STOP_TARGET && audit.consecutive_target >= STOP_CONSEC) {
+        stopReason = `STOP-${STOP_TARGET}x${STOP_CONSEC}-audit-confirmed`; break
+      }
+    }
+  }
+
+  round++
+}
+
+// ── 핸드오프 (★auto-merge 안 함 — "stay the engineer") ──────────────────────
+return {
+  stopReason: stopReason || `max-rounds-reached(${MAX_ROUNDS})`,
+  rounds_done: round,
+  last_active_total: lastScore,
+  target: STOP_TARGET,
+  branch: BRANCH,
+  produced,
+  human_gate:
+    `★auto-merge 안 함 — produced 브랜치(${BRANCH})를 인간이 리뷰·머지하세요. ` +
+    `원격/prod 적용(마이그레이션·cutover·자격증명)은 별도 인간 게이트. ` +
+    `STOP(${STOP_TARGET}×${STOP_CONSEC})/ESCALATE(no-progress)/BLOCKED/budget/maxRounds 에서 정지함. ` +
+    `중단됐다면 ${RUNTIME}/checkpoint.json 에서 이어서 재호출 가능(디스크=메모리).`,
+}

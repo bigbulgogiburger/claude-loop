@@ -20,7 +20,7 @@
 ## 1. 아키텍처 — 보편 엔진 + 프로젝트 설정
 
 ```
-~/.claude/skills/loop/                 # 보편 (모든 프로젝트 공유)
+~/.claude/skills/completeness-loop/    # 보편 (모든 프로젝트 공유)
 ├── SKILL.md                           # 단일 진입점 (init/score/run/status 모드 분기)
 ├── references/
 │   ├── cycle.md                       # 루프 사이클 절차

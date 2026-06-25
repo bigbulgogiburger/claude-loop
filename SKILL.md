@@ -1,5 +1,5 @@
 ---
-name: loop
+name: completeness-loop
 description: >-
   Universal loop-engineering skill — 임의의 코드 프로젝트에 까는 재사용 완성도 루프 프레임워크
   (Addy Osmani "Build the loop, stay the engineer"). "잘됨"을 계산 가능한 0~100 score 로 정의하고
@@ -93,7 +93,7 @@ description: >-
 
 **보편(이 스킬·references·templates) = 엔진·절차. 프로젝트별(`.loop/`) = rubric·probe·env.**
 (jira-ingest 이 정책을 `INDEX-SCHEMA.md` 로 외화한 것과 동형.) `loop.yaml` 스키마·`scorecard.md`
-구조는 `~/.claude/skills/loop/templates/*.tmpl` + DESIGN §3 참조 — init 이 채워 쓴다.
+구조는 `~/.claude/skills/completeness-loop/templates/*.tmpl` + DESIGN §3 참조 — init 이 채워 쓴다.
 
 ---
 
@@ -104,11 +104,13 @@ description: >-
 ### init — 스캔 + 풀 인터뷰 → `.loop/` 생성
 `.loop/` 가 없거나 사용자가 셋업을 원할 때. **여기가 "기획" 엔진** — 스캔이 초안을 제안하고 인터뷰가 확정한다.
 
+> **목표점수 param** — 호출에 `target=<N>`(선택: `consecutive=<N>`·`full_audit_every=<N>`)이 있으면 그 값을 `stop.*` 로 사전 채택하고 B-5 의 해당 질문을 생략한다. 없으면 인터뷰에서 묻는다(기본 `target=90`·`consecutive=2`·`full_audit_every=3`). 예: `loop init target=95`. (목표·종료 조건만 param 화 — dimensions/probe/env 는 스캔+인터뷰로 확정. 상세 → `references/init-flow.md` §0.5)
+
 ```
 A 스캔(read-only)  언어/프레임워크(package.json·build.gradle·go.mod·requirements…)·테스트/기동/DB/인증·
                    도메인/모듈 경계(→ dimension 후보)·CI 스크립트(→ probe 후보) 자동 탐지
 B 인터뷰(풀)        스캔 결과를 보여주고 사람이 확정/보정: ①목표 한 줄 ②dimensions+weights(Σ=1.0 검산)
-                   ③각 축 probe="코드 존재 아닌 실동작" 신호 ④env(기동/DB/test/auth) ⑤stop.target·범위 가드
+                   ③각 축 probe="코드 존재 아닌 실동작" 신호 ④env(기동/DB/test/auth) ⑤stop.target(param 우선, 없으면 질문)·범위 가드
 C 생성             .loop/loop.yaml + scorecard.md(rubric 산문) + driver.js(templates/*.tmpl 채움)
 D baseline         "지금 baseline 잴까요?" → score(full) 1회 → scorecard.md §점수이력 R0
 ```

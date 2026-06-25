@@ -35,6 +35,20 @@
 
 `scorecard.md` 의 §점수이력은 **절대 파기하지 않는다** (R0~Rn append-only 자산). 전체 재생성 시에도 §이력 블록은 carry-over.
 
+### § 0.5. init 파라미터 (목표점수 등 사전 입력)
+
+init 호출 인자(ARGUMENTS)에 `key=value` 형식이 있으면 해당 `stop.*` 값을 **사전 채택**하고 [B-5] 의 그 질문을 생략한다(나머지 인터뷰 단계는 그대로 진행). 지원 파라미터:
+
+| param | 매핑 | 예 | 미지정 시 |
+|-------|------|-----|----------|
+| `target=<N>` | `stop.target` (목표 종합점수, 1~100) | `target=95` | [B-5] 에서 질문 — 기본 **90** |
+| `consecutive=<N>` | `stop.consecutive` (연속 full-audit 회수) | `consecutive=3` | 기본 **2** |
+| `full_audit_every=<N>` | `stop.full_audit_every` (권위 재채점 주기) | `full_audit_every=5` | 기본 **3** |
+
+- **파싱**: ARGUMENTS 에서 `key=value`(공백·콤마 구분 허용, 예 `target=90 consecutive=3`) 추출 → 범위 검증(`target` 1~100, 나머지 ≥1). 범위 밖/형식오류면 무시하고 질문으로 폴백.
+- **표기**: 사전 채택값은 [C] 생성 카드에 `param 적용: target=90` 으로 명시하고, [B-5] 는 해당 항목을 `✓ param 으로 설정됨(target=90) — 확인만` 으로 압축(미지정 항목은 정상 질문).
+- **범위**: param 은 **목표·종료 조건만** 받는다 — `dimensions`/`weights`/`probe`/`env` 는 코드베이스 고유라 param 화하지 않고 스캔+인터뷰로 확정(invariant #5: 사람이 루프 안에).
+
 ---
 
 ## [A] 스캔 — 코드베이스 자동 탐지 (read-only, 부작용 0)
@@ -194,10 +208,10 @@ probe 가 환경상 불가능한 축(예: 외부 cert 필요)은 **BLOCKED** 로
 ### B-5. stop.target + 범위 가드
 
 ```
-5️⃣ 종료 조건 + 안전 범위
-   stop.target      : <98>     ← 이 점수 이상이 done
-   stop.consecutive : <2>      ← 연속 full-audit 회수 (국소회귀 방지)
-   full_audit_every : <3>      ← 권위 재채점 주기
+5️⃣ 종료 조건 + 안전 범위   (★ §0.5 param 으로 받은 값은 질문 생략·확인만)
+   stop.target      : <param target=N 있으면 그 값 / 없으면 질문 — 기본 90>  ← 이 점수 이상이 done
+   stop.consecutive : <param 없으면 기본 2>      ← 연속 full-audit 회수 (국소회귀 방지)
+   full_audit_every : <param 없으면 기본 3>      ← 권위 재채점 주기
    safety.scope     : local-only            (고정 — 변경 불가)
    safety.forbid    : [push, flyway*qa, rm -rf, <prod write 패턴…>]
    safety.auto_merge: false                 (고정 — 변경 불가)

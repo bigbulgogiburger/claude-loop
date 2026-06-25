@@ -17,7 +17,7 @@ LLM 에이전트는 **측정 가능한 신호를 최적화**하는 건 잘합니
 
 > 🎓 **비유**: 시험 공부를 "열심히 해"라고 하면 막연합니다.
 > 대신 **모의고사를 봅니다**(점수) → **틀린 단원을 찾고**(triage) → **그 단원을 공부하고**(fix) → **다시 모의고사를 봅니다**(re-score).
-> 점수가 목표(예: 98점)에 닿으면 멈춥니다. **공부 자체보다 "이 루프를 설계하는 것"이 핵심**입니다.
+> 점수가 목표(기본 90점)에 닿으면 멈춥니다. **공부 자체보다 "이 루프를 설계하는 것"이 핵심**입니다.
 
 `claude-loop` 은 이 루프를 코드 프로젝트에 그대로 적용합니다.
 
@@ -28,14 +28,14 @@ flowchart LR
     F --> V["✅ verify<br/>검증 (verifier≠maker)"]
     V --> R["📊 re-score"]
     R -->|"목표 미달"| T
-    R -->|"목표 98 × 2회"| STOP["🏁 STOP"]
+    R -->|"목표(기본 90) × 2회"| STOP["🏁 STOP"]
 ```
 
 ---
 
 ## ✨ 무엇을 해주나 — 모드 4개, 진입점 1개
 
-`loop` 스킬 하나에 4개 모드가 있고, **자연어 의도로 자동 분기**합니다(플래그 없음):
+`completeness-loop` 스킬 하나에 4개 모드가 있고, **자연어 의도로 자동 분기**합니다(플래그 없음):
 
 | 한마디로 하면 | 모드 | 무슨 일이 일어나나 |
 |--------------|------|-------------------|
@@ -77,13 +77,15 @@ flowchart LR
 
 ## 📦 설치
 
-Claude Code 스킬이므로 `~/.claude/skills/loop/` 에 두면 끝입니다:
+Claude Code 스킬이므로 `~/.claude/skills/completeness-loop/` 에 두면 끝입니다:
 
 ```bash
-git clone https://github.com/bigbulgogiburger/claude-loop ~/.claude/skills/loop
+git clone https://github.com/bigbulgogiburger/claude-loop ~/.claude/skills/completeness-loop
 ```
 
-이제 Claude Code 세션에서 `loop` 스킬이 자동 인식됩니다. (확인: 새 세션에서 "루프 현황" 또는 "loop init")
+이제 Claude Code 세션에서 `completeness-loop` 스킬이 자동 인식됩니다. (확인: 새 세션에서 "루프 현황" 또는 "loop init")
+
+> ℹ️ 스킬명은 `completeness-loop` 입니다 — Claude Code 빌트인 `/loop`(스케줄·self-pacing)와 충돌하지 않도록 분리했습니다. 자연어("루프 셋업"·"재채점"·"루프 현황")로 트리거하거나 `/completeness-loop` 로 호출하세요.
 
 ---
 
@@ -94,6 +96,7 @@ git clone https://github.com/bigbulgogiburger/claude-loop ~/.claude/skills/loop
   → [init] 코드베이스 스캔(언어·테스트·기동·DB 자동 탐지) → 인터뷰 5문항
           (목표 / 측정 축 + 가중치 / 각 축을 어떻게 '실제 동작'으로 확인 / 환경 / 목표점수)
           → .loop/ 생성 (loop.yaml · scorecard.md · driver.js)
+          ※ 목표점수는 param 으로도: "루프 셋업 target=95" (기본 90 · 미지정 시 인터뷰에서 질문)
 
 나: 지금 완성도 몇 점이야?
   → [score] 실환경 probe 로 측정 → "활성 종합 72/100 · 가장 약한 고리: 결제(48)"
@@ -102,7 +105,7 @@ git clone https://github.com/bigbulgogiburger/claude-loop ~/.claude/skills/loop
   → [run 1] 결제 고치기 → 검증 → 재채점 → "결제 48→71, 종합 72→76" → 멈춤(사람 검수)
 
 나: 좋아, 루프 10라운드 돌려
-  → [run 10] 무인으로 약한 고리부터 차례로 → STOP(98×2) 또는 막힘에서 정지
+  → [run 10] 무인으로 약한 고리부터 차례로 → STOP(목표×2) 또는 막힘에서 정지
             → 브랜치 핸드오프 (auto-merge 안 함)
 ```
 
@@ -113,7 +116,7 @@ git clone https://github.com/bigbulgogiburger/claude-loop ~/.claude/skills/loop
 ### 보편 엔진 + 프로젝트 설정
 
 ```
-~/.claude/skills/loop/        ← 보편 엔진 (이 repo, 모든 프로젝트 공유)
+~/.claude/skills/completeness-loop/   ← 보편 엔진 (이 repo, 모든 프로젝트 공유)
 ├── SKILL.md                  ← 단일 진입점 (모드 분기)
 ├── references/               ← 절차 SSoT
 │   ├── cycle.md              · 루프 사이클

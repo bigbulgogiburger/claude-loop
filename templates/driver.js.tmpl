@@ -52,7 +52,8 @@ export const meta = {
 // {{stop_consecutive}}: stop.consecutive         — target 연속 full-audit 횟수
 // {{full_audit_every}}: stop.full_audit_every    — 권위 재채점 주기(라운드)
 // {{triage_order}}    : triage_order             — "auto" 또는 [dim,...] 실행순서
-// {{forbid_list}}     : safety.forbid            — 금지 작업(쉼표구분 산문)
+// {{forbid_list}}     : safety.forbid            — 금지 작업(쉼표구분 산문, maker 프롬프트 주입용)
+// {{forbid_array}}    : safety.forbid            — JS 배열 리터럴(checkForbid 코드 가드용). 예: ['git push','push --force','git merge','gh pr merge','rm -rf','flyway*qa']  // ★bare 'merge'/'force'/'push' 금지 — operation-anchor(safety.md §4.1)
 // {{env_start}}/{{env_db}}/{{env_test}}/{{env_auth}} : env.*  — 세계를 살리는 법
 const SCORECARD       = '{{scorecard_path}}'
 const RUNTIME         = '{{runtime_dir}}'
@@ -61,7 +62,23 @@ const STOP_TARGET     = {{stop_target}}
 const STOP_CONSEC     = {{stop_consecutive}}
 const FULL_AUDIT_EVERY = {{full_audit_every}}
 const TRIAGE_ORDER    = '{{triage_order}}'   // "auto"(weakest-link-first) 또는 "[d1,d2,...]"
-const FORBID          = '{{forbid_list}}'    // 예: "push, force-push, prod write, *remote* migrate, rm -rf"
+const FORBID          = '{{forbid_list}}'    // 예: "push, force-push, prod write, *remote* migrate, rm -rf" (maker 프롬프트 주입용 산문)
+
+// ★forbid 코드 가드(safety.md §1·§4 이중방어의 코드측 절반) — sub-agent 자기검열을 신뢰하지 않고 driver 가 재매칭.
+//   driver 는 Workflow 런타임상 sub-agent 내부 툴콜을 직접 가로챌 수 없어, maker/verifier 가 schema 로 보고한
+//   risky_cmds(부작용 커맨드)를 아래 패턴과 매칭한다. 히트 시 그 라운드를 PASS 로 세지 않고 abort+surface.
+//   ※한계: sub-agent 가 risky_cmds 를 누락하면 못 잡음(순수 Claude maker 전제의 보조 결정론 가드) — safety.md §4.1.
+const FORBID_PATTERNS = {{forbid_array}}   // init 이 loop.yaml.safety.forbid 를 JS 배열로 치환. 예: ['git push','push --force','git merge','gh pr merge','rm -rf','flyway*qa']  // ★bare 'merge'/'force'/'push' 금지 — operation-anchor(safety.md §4.1)
+function _forbidRe(p) { return new RegExp(p.split('*').map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*'), 'i') }
+function checkForbid(cmds) {
+  if (!Array.isArray(cmds) || !cmds.length) return []
+  const hits = []
+  for (const c of cmds) for (const p of FORBID_PATTERNS) {
+    const hit = p.includes('*') ? _forbidRe(p).test(c) : c.toLowerCase().includes(p.toLowerCase())
+    if (hit) hits.push(`${p} ⟵ "${c}"`)
+  }
+  return hits
+}
 
 // env 힌트(sub-agent 프롬프트에 주입 — 죽은 세계에서 거짓상승 방지)
 const ENV = {
@@ -71,6 +88,10 @@ const ENV = {
   auth:  '{{env_auth}}',   // 비-권한 토큰 획득법(IDOR/scope probe 용)
 }
 
+// ★브랜치 선택은 오케스트레이터(run 모드 메인)가 cycle.md '브랜치 선택 규칙'대로 1회 결정해 args.branch 로 전달한다:
+//   현재 브랜치가 loop/* 면 그 브랜치 적층 / 아니면 loop/{{name}}_YYYYMMDD 신규 생성 후 시작.
+//   driver 는 Workflow 런타임상 git 불가 → 결정 불가. fallback 'loop/{{name}}' 은 args 누락 시 안전망일 뿐 —
+//   인간 머지 후 stale 일 수 있는 동명 브랜치 재사용 위험이 있으니 항상 args.branch 를 전달하라.
 const BRANCH = (args && args.branch) || 'loop/{{name}}'
 // budget 있으면 라운드당 ~120k 로 스케일, 없으면 6라운드 상한(무한루프 방지)
 const MAX_ROUNDS =
@@ -80,13 +101,13 @@ const MAX_ROUNDS =
 // ── 단계별 compact 반환 스키마 (sub-agent 가 파일 전체/추론 대신 이것만 회수) ──
 const TRIAGE_SCHEMA = {
   type: 'object',
-  required: ['next_id', 'label', 'active_total', 'no_progress', 'consecutive_target', 'blocked_only_remaining'],
+  required: ['next_id', 'label', 'active_total', 'no_progress', 'consecutive_at_target', 'blocked_only_remaining'],
   properties: {
     next_id:             { type: 'string',  description: '실행순서상 다음 미완 dimension id (loop.yaml dimensions[].id)' },
     label:               { type: 'string',  description: '그 dimension 의 사람 라벨' },
     active_total:        { type: 'number',  description: 'BLOCKED 재정규화 후 활성 종합점수' },
     no_progress:         { type: 'number',  description: '같은 deficit 연속 미해결 라운드 수' },
-    consecutive_target:  { type: 'number',  description: 'active_total≥target 을 연속 만족한 full-audit 횟수' },
+    consecutive_at_target:  { type: 'number',  description: 'active_total≥target 을 연속 만족한 full-audit 횟수' },
     blocked_only_remaining: { type: 'boolean', description: '남은 미완이 BLOCKED 뿐인가' },
     reason:              { type: 'string' },
   },
@@ -99,6 +120,7 @@ const FIX_SCHEMA = {
     files:          { type: 'array', items: { type: 'string' } },
     summary:        { type: 'string',  description: '구현 요약 5줄 이내' },
     self_test_pass: { type: 'boolean', description: '데몬 ON 자체 빌드/테스트 GREEN 여부' },
+    risky_cmds:     { type: 'array', items: { type: 'string' }, description: '이 단계에서 실행한 부작용 커맨드(git push/merge·DB write·migration·deploy 등). forbid 가드 재매칭용 — 없으면 빈 배열.' },
   },
 }
 const VERDICT_SCHEMA = {
@@ -108,6 +130,7 @@ const VERDICT_SCHEMA = {
     pass:     { type: 'boolean' },
     verdict:  { type: 'string', enum: ['PASS', 'ITERATE', 'ESCALATE'] },
     evidence: { type: 'string', description: '실probe 핵심 신호(상태코드/DB SUM/403/벤치 등) — 이게 없으면 PASS 금지' },
+    risky_cmds: { type: 'array', items: { type: 'string' }, description: 'probe 가 실행한 부작용 커맨드(DB write·migration·deploy 등). forbid 가드 재매칭용 — 없으면 빈 배열.' },
   },
 }
 const SCORE_SCHEMA = {
@@ -122,10 +145,10 @@ const SCORE_SCHEMA = {
 }
 const AUDIT_SCHEMA = {
   type: 'object',
-  required: ['active_total', 'consecutive_target', 'appended'],
+  required: ['active_total', 'consecutive_at_target', 'appended'],
   properties: {
     active_total:       { type: 'number' },
-    consecutive_target: { type: 'number' },
+    consecutive_at_target: { type: 'number' },
     appended:           { type: 'boolean', description: 'scorecard.md §이력 + json 디스크 기록 여부' },
   },
 }
@@ -147,7 +170,7 @@ while (round < MAX_ROUNDS) {
     `triage_order=${TRIAGE_ORDER} 에 따라 다음 미완(deficit) dimension 을 고른다: ` +
     `"auto" 면 weakest-link-first(최약 고리 = 가중 binding constraint), 명시 배열이면 그 실행순서상 첫 미완. ` +
     `반환: next_id, label, 현재 active_total(§4.1a BLOCKED 재정규화 후), no_progress 카운트, ` +
-    `consecutive_target(target=${STOP_TARGET} 연속 만족 횟수), 남은 게 BLOCKED 뿐인지(blocked_only_remaining).`,
+    `consecutive_at_target(target=${STOP_TARGET} 연속 만족 횟수), 남은 게 BLOCKED 뿐인지(blocked_only_remaining).`,
     { label: `triage-r${round + 1}`, phase: 'Triage', schema: TRIAGE_SCHEMA }
   )
   if (!tri) { stopReason = 'triage-failed'; break }
@@ -155,7 +178,7 @@ while (round < MAX_ROUNDS) {
   // ── 결정론적 종료 게이트 (DESIGN §7) ──
   // STOP 은 full 점수로만 확정한다(per-round 부분점수로 STOP 선언 금지 — 국소회귀 미검출).
   // 여기서는 직전 audit 이 이미 target×consecutive 를 충족했는지를 checkpoint 가 알려준다.
-  if (tri.active_total >= STOP_TARGET && tri.consecutive_target >= STOP_CONSEC) {
+  if (tri.active_total >= STOP_TARGET && tri.consecutive_at_target >= STOP_CONSEC) {
     stopReason = `STOP-${STOP_TARGET}x${STOP_CONSEC}`; break
   }
   if (tri.blocked_only_remaining) { stopReason = 'BLOCKED-only-remaining'; break }
@@ -172,10 +195,13 @@ while (round < MAX_ROUNDS) {
     `마이그레이션은 local 적용·검증만(원격 적용 금지). ` +
     `환경: 기동="${ENV.start}", 테스트="${ENV.test}"(플래그/데몬 주의). ` +
     `구현 후 ${BRANCH} 에 커밋(★머지 금지). 자체 빌드/테스트 GREEN 확인. ` +
-    `★compact 만 반환: branch·바뀐 files 목록·summary 5줄·self_test_pass. 파일 전체내용/추론 반환 금지.`,
+    `★compact 만 반환: branch·바뀐 files 목록·summary 5줄·self_test_pass + risky_cmds(실행한 부작용 커맨드 배열 — forbid 가드 재매칭, 위반 의도 없어도 정직 보고, 없으면 빈 배열). 파일 전체내용/추론 반환 금지.`,
     { label: `fix-r${round + 1}-${tri.next_id}`, phase: 'Fix', schema: FIX_SCHEMA }
   )
   if (!fix) { stopReason = `fix-failed@${tri.next_id}`; break }
+  // ★forbid 가드 — maker 가 보고한 risky_cmds 재매칭(자기검열 불신). 히트 시 PASS 로 세지 않고 abort+surface.
+  const fixForbid = checkForbid(fix.risky_cmds)
+  if (fixForbid.length) { stopReason = `FORBID-violation@fix-${tri.next_id}: ${fixForbid.join(' · ')}`; log(`R${round + 1}: ★FORBID 위반 abort(fix) — ${fixForbid.join(' · ')}`); break }
 
   // ── 3. Verify (maker≠verifier) ── 코드 안 짠 별도 에이전트가 실환경 재probe (anti-gaming)
   phase('Verify')
@@ -187,9 +213,13 @@ while (round < MAX_ROUNDS) {
     `세계를 먼저 살린다: 기동="${ENV.start}". 신호 수집: DB="${ENV.db}"(read-only), 비-권한 토큰="${ENV.auth}". ` +
     `★리뷰 verdict 단독으로 PASS 금지 — 실probe 신호(상태코드/DB SUM/403/벤치)가 필수다. ` +
     `live 가 죽어 신호를 못 얻으면 pass=false + verdict="ITERATE"(거짓상승 방지). ` +
-    `반환: pass·verdict·evidence(핵심 실신호).`,
+    `반환: pass·verdict·evidence(핵심 실신호) + risky_cmds(probe 가 실행한 부작용 커맨드, 없으면 빈 배열).`,
     { label: `verify-r${round + 1}-${tri.next_id}`, phase: 'Verify', schema: VERDICT_SCHEMA }
   )
+
+  // ★forbid 가드 — verifier 가 보고한 risky_cmds(probe 가 DB write/원격 등 건드렸는지) 재매칭.
+  const verForbid = ver ? checkForbid(ver.risky_cmds) : []
+  if (verForbid.length) { stopReason = `FORBID-violation@verify-${tri.next_id}: ${verForbid.join(' · ')}`; log(`R${round + 1}: ★FORBID 위반 abort(verify) — ${verForbid.join(' · ')}`); break }
 
   if (!ver || !ver.pass) {
     log(`R${round + 1}: verify FAIL (${ver ? ver.verdict : 'agent-died'}) → no-progress++`)
@@ -208,7 +238,7 @@ while (round < MAX_ROUNDS) {
   const sc = await agent(
     `loop score 를 per-round 모드로 dimension "${tri.next_id}" 만 재채점(터치한 축 1개만). ` +
     `§4.1a 활성 재정규화(BLOCKED 분자·분모 제외) 적용. observed 동작 → band(FULL/PARTIAL/CONFLICT/MISSING) → 가중 blend. ` +
-    `${RUNTIME}/scorecard.json + checkpoint.json(next_id 비움·no_progress=0·last_verdict="PASS"·active_total·consecutive_target) ` +
+    `${RUNTIME}/scorecard.json + checkpoint.json(next_id 비움·no_progress=0·last_verdict="PASS"·active_total·consecutive_at_target) ` +
     `기록(디스크 write). ★compact 만: dimension·dimension_score·active_total·appended.`,
     { label: `rescore-r${round + 1}-${tri.next_id}`, phase: 'Rescore', schema: SCORE_SCHEMA }
   )
@@ -224,14 +254,14 @@ while (round < MAX_ROUNDS) {
     const audit = await agent(
       `loop score 를 full 모드로 — ${LOOP_YAML} 의 전 dimensions 를 sub-agent fan-out 으로 재감사(교차오염·국소회귀 검출). ` +
       `각 축 probe 를 실환경에서 다시 돌린다(기동="${ENV.start}"). §4.1a 활성 재정규화 적용. ` +
-      `직전 full 대비 연속 target(${STOP_TARGET}) 충족이면 consecutive_target 을 증가, 아니면 0 으로 리셋. ` +
+      `직전 full 대비 연속 target(${STOP_TARGET}) 충족이면 consecutive_at_target 을 증가, 아니면 0 으로 리셋. ` +
       `${SCORECARD} §점수이력에 R${round + 1} 행 append + ${RUNTIME}/scorecard.json + checkpoint.json 기록(디스크 write). ` +
-      `★compact 만: active_total·consecutive_target·appended.`,
+      `★compact 만: active_total·consecutive_at_target·appended.`,
       { label: `audit-r${round + 1}`, phase: 'Audit', schema: AUDIT_SCHEMA }
     )
     if (audit) {
       if (audit.active_total != null) lastScore = audit.active_total
-      if (audit.active_total >= STOP_TARGET && audit.consecutive_target >= STOP_CONSEC) {
+      if (audit.active_total >= STOP_TARGET && audit.consecutive_at_target >= STOP_CONSEC) {
         stopReason = `STOP-${STOP_TARGET}x${STOP_CONSEC}-audit-confirmed`; break
       }
     }

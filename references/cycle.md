@@ -99,7 +99,10 @@ no_progress ≥ 2                                                     → ESCALA
 
 maker 는 **worktree sub-agent** 가 수행한다(메인 세션이 직접 코드를 짜지 않는다 — 그래야 [3]의 verify 가 *자기가 안 짠 코드*를 보는 진짜 maker≠verifier 가 되고, 메인 컨텍스트도 보호된다). 검증된 패턴: teammate 가 구현만, 메인이 검증/통합 commit.
 
-- **브랜치**: `loop.yaml` 에 branch 컨벤션이 있으면 그걸로(예 `feat/<deficit>`, 서브태스크 병렬 시 `-{k}`), 없으면 `loop/<name>` 단일 브랜치에 적층. **main 직접 커밋 금지**. `isolation: worktree`.
+- **브랜치 선택 규칙** (run 진입 시 **오케스트레이터(메인)가 1회 결정** → `args.branch` 로 driver 에 고정 전달. driver.js 는 Workflow 런타임상 git 접근 불가 → 메인이 결정해 넘긴다):
+  - **현재 브랜치가 이미 루프 브랜치(`loop/*`)면 → 그 브랜치에 계속 적층**(세션 이어가기).
+  - **아니면(main 등 비-루프 브랜치) → `loop/<name>_YYYYMMDD` 를 현재 브랜치에서 새로 생성**해 시작. ⚠️ 기존 동명 루프 브랜치(`loop/<name>`)는 이미 인간이 머지해 stale(base 가 main 보다 뒤처짐 — 그 위에 쌓으면 옛 코드로 빌드/probe)일 수 있으므로 **재사용 금지** — 날짜 suffix 로 세션을 격리한다.
+  - `loop.yaml` 에 명시 branch 컨벤션이 있으면 그게 우선(예 `feat/<deficit>`, 서브태스크 병렬 시 `-{k}`). 어느 경우든 **main 직접 커밋 금지** · `isolation: worktree`.
 - **sub-agent 에 전달**: 대상 deficit + `.loop/scorecard.md` 의 해당 dimension 체크리스트(FULL 정의/잔여 갭) + rubric evidence anchor(file:line). loop.yaml 의 dimension.evidence 가 grounding.
 - **sub-agent 반환 (compact만 — driver FIX_SCHEMA)**: `{branch, files[], summary(≤5줄), self_test_pass}`. 파일 전체내용·추론은 반환 금지 — 메인이 들고 있지 않아야 한다.
 - **자체 빌드/테스트**: maker 가 `loop.yaml: env.test` 로 자체 검증(데몬/플래그 주의 — env.test 에 명시된 그대로. 임의 플래그 추가 금지).

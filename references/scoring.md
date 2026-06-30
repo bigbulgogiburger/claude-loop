@@ -125,10 +125,13 @@ full 모드는 dimension 별 sub-agent fan-out(컨텍스트 규율 §2). 각 age
 
 | 등급 | 점수대 | 정의 |
 |------|--------|------|
-| **FULL** | 80~90 | 실 전계층(예: BE/FE/DB·API/UI·service/store) LIVE + 게이트/불변식 강제 |
+| **EXEMPLARY** | 91~100 | FULL 의 모든 조건 + **코드신호 상한(90)을 넘는 상위 실신호로 결박된 탁월**. db/http/test/grep 만으로는 **최대 90** — 91+ 는 반드시 그 도메인의 상위 검증(Playwright 시각정합·부하벤치·고객→제품→자재→보증 e2e 단일추적 등)이 깔려야 인정. |
+| **FULL** | 80~90 | 실 전계층(예: BE/FE/DB·API/UI·service/store) LIVE + 게이트/불변식 강제. **코드신호(db/http/test/grep)만으로 도달 가능한 천장 = 90.** |
 | **PARTIAL** | 40~78 | 일부 계층만 결선 or 단일 계층 의존(우회 가능) |
 | **CONFLICT** | 25~55 | 코드는 LIVE 이나 **목표 명세와 정면충돌**(예: spec-out-of-scope 인데 live·잘못된 의미로 배선) |
 | **MISSING** | 12~30 | 진입점·producer 부재(dead path 포함 — 소비자/조회는 있는데 write 진입점 없어 늘 빈 결과) |
+
+> **★90 천장 규칙 (anti-gaming — 전 dimension 일관 적용)**: 코드신호(db/http/test/grep)만으로 매기는 점수의 상한은 **90**(FULL top). 91~100(EXEMPLARY)은 **그 도메인의 상위 실신호가 결박될 때만** 인정한다 — 예: FE/UI 도메인=Playwright 시각 회귀 0 + 브랜드 보존, 기능 도메인=단일 트레이스 e2e(고객→제품→자재→보증 한 건 관통) 또는 부하/벤치 임계 통과. **한 도메인만 90 캡(예: design·code-health)을 적용하고 다른 도메인은 자유롭게 91+ 부여하는 비대칭은 score-gaming** — 91+ 를 주려면 *어느 도메인이든* 상위 실신호 증거를 §점수이력 비고에 명시해야 한다. 상위 신호 없이 91+ 면 90 으로 강등.
 
 ### 5대 감점 원칙 (이게 anti-gaming — 반드시 적용)
 

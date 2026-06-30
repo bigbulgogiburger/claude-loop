@@ -241,6 +241,8 @@ probe 가 환경상 불가능한 축(예: 외부 cert 필요)은 **BLOCKED** 로
 1. **`loop.yaml`** ← `templates/loop.yaml.tmpl` 채움. version·name·goal·dimensions(id/label/weight/scenarios/evidence/probe)·env·stop·triage_order·safety. **Σweight=1.0 재검산**(쓰기 직전 마지막 가드). 자격증명 평문 0건 확인.
 2. **`scorecard.md`** ← `templates/scorecard.md.tmpl` 채움. 각 dimension 의 FULL/PARTIAL/CONFLICT/MISSING 산문 정의 + `## 점수이력` 빈 표(헤더만). 이게 사람이 읽는 rubric SSoT(yaml 은 기계용).
 3. **`driver.js`** ← `templates/driver.js.tmpl` 채움. for r in 1..N 루프, triage→fix→verify→score→영속→STOP/ESCALATE/BLOCKED 체크. 프로젝트값(env 명령·stop 파라미터) 주입. `auto_merge` 호출 경로 **부재** 확인.
+   - **STOP 상수**: `{{stop_target}}`/`{{stop_consecutive}}`/`{{full_audit_every}}` 를 `loop.yaml.stop` 값으로 치환(driver 는 런타임상 yaml 미파싱 → 생성시점 고정). ★값 변경 시 driver 손편집 금지 — `loop.yaml.stop` 을 고치고 **재-init** 으로 재생성(손편집 fork 는 SSoT drift·STOP off-by-one 의 근원).
+   - **forbid 치환(2종)**: `safety.forbid` 를 ① 산문 `{{forbid_list}}`(maker 프롬프트 주입용) ② **JS 배열** `{{forbid_array}}`(`checkForbid()` 코드 가드용 — 예 `['git push','force','rm -rf','flyway*qa','merge']`) **둘 다**로 치환. 배열이 있어야 driver 가 maker/verifier 의 `risky_cmds` 를 재매칭해 abort 할 수 있다(safety.md §4.1).
 4. **`scorecard.json` / `checkpoint.json`**: baseline 전이라 **빈 골격**만(`{"round":null,...}`) — [D] 에서 R0 로 채움.
 
 > 멱등성: 재-init(§0)이 아닌 한 기존 파일 덮어쓰기 금지. 모든 쓰기 전 `Read` 로 존재/내용 확인(부분 patch 모드 대비).

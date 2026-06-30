@@ -115,8 +115,10 @@ mock 어댑터 → live 전환(외부 결제/배송/알림/벤더 API 의 운영
 ### 4.1 매칭 규칙
 
 - 패턴은 커맨드 문자열의 **부분 일치**(substring) 또는 **glob**(예: `flyway*qa`)로 해석한다. 대소문자 무시 권장.
-- sub-agent 의 자기검열을 **신뢰하지 않는다** — sub-agent 가 "안 했다"고 주장해도 가드가 실제 실행 커맨드를 다시 매칭한다(이중 방어, §1).
+- **★bare 동사 금지 — operation-anchor 필수**: `merge`·`push`·`force`·`pull` 같은 맨몸 동사를 substring 패턴으로 쓰지 말고 `git merge`·`git push`·`push --force` 처럼 **커맨드에 앵커**한다. 맨몸 `merge` 는 `git commit … (no push/merge)`(부정 주석)·`merged`·`submerge` 에, 맨몸 `force` 는 `enforce`·`workforce` 에 오발해 **무해한 라운드를 자폭**시킨다(2026-06-30 실사고: maker 가 "머지 안 함"을 정직 보고한 `no push/merge` 의 `merge` 글자에 가드가 걸려 abort — 정직을 처벌). 부정·주석·합성어에서 동사가 등장해도 실제 *연산*이 아니면 막지 않아야 한다.
+- sub-agent 의 자기검열을 **신뢰하지 않는다** — sub-agent 가 "안 했다"고 주장해도 가드가 보고된 커맨드를 다시 매칭한다(이중 방어, §1).
 - 의심스러우면 차단(fail-safe): 패턴 모호성은 abort 쪽으로 해석.
+- **구현(driver 코드 가드) — 현실적 한계 명시**: Workflow 런타임의 `driver.js` 는 sub-agent 의 **내부 툴콜을 직접 가로챌 수 없다**(샌드박스 인터셉트 불가). 그래서 maker/verifier 의 반환 schema(`risky_cmds: string[]`)로 **보고된** 부작용 커맨드를 `checkForbid()` 가 위 패턴과 재매칭하고, 히트 시 그 라운드를 PASS 로 세지 않고 `stopReason='FORBID-violation'` 으로 abort 한다(`templates/driver.js.tmpl`). **이는 sub-agent 가 위반 커맨드를 `risky_cmds` 에 누락하면 못 잡는다** — 순수 Claude(비적대적) maker 를 전제한 **보조 결정론 가드**이지 완전 강제(OS 샌드박스)가 아니다. 진짜 방어선 3겹: ① maker 프롬프트의 forbid 지시 준수 ② driver 의 `risky_cmds` 재매칭(보조) ③ **auto-merge 금지 + 인간 머지 게이트**(최종). 적대적 maker(예: 외부 async 에이전트)는 이 모델 밖 — DESIGN §6 "순수 Claude sub-agent" 전제를 깨지 말 것.
 
 ### 4.2 기본 forbid (init 이 모든 프로젝트에 심는 baseline)
 
@@ -132,7 +134,7 @@ safety:
     - "push -f"
     - "push --force-with-lease"     #  보수적으로 force 계열 전체 차단(원격쓰기는 인간)
     - "git push"                    #  ★루프는 push 안 함 — 브랜치는 local. 원격 push 는 인간 게이트
-    - "merge"                       #  auto-merge 금지(브랜치 핸드오프만)
+    - "git merge"                   #  auto-merge 금지(브랜치 핸드오프만). ★bare "merge" 금지(operation-anchor §4.1) — "no push/merge" 등 오발 자폭
     - "gh pr merge"
     - "reset --hard origin"         #  원격 기준 파괴적 리셋
     # ── 파괴적 파일/디스크 ──
